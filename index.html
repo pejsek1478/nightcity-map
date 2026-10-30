@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NightCity Map</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#07070d">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+  :root {
+    --yellow: #fcee0a;
+    --cyan: #00f0ff;
+    --magenta: #ff2a6d;
+    --bg: #07070d;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  #map { position: absolute; inset: 0; }
+
+  /* scanlines + vignette */
+  #fx {
+    position: absolute; inset: 0; pointer-events: none; z-index: 5;
+    background:
+      repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0, rgba(0,0,0,0) 2px, rgba(0,0,0,.18) 3px),
+      radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.55) 100%);
+    mix-blend-mode: multiply;
+  }
+
+  /* HUD */
+  .hud {
+    position: absolute; z-index: 10; font-family: "Courier New", monospace;
+    color: var(--yellow); text-transform: uppercase; letter-spacing: .08em;
+  }
+  #title {
+    top: calc(env(safe-area-inset-top, 0px) + 12px); left: 12px;
+    padding: 6px 10px; font-size: 12px;
+    background: rgba(7,7,13,.8); border-left: 3px solid var(--yellow);
+    clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  }
+  #coords {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 14px); left: 12px;
+    padding: 5px 10px; font-size: 11px; color: var(--cyan);
+    background: rgba(7,7,13,.8); border-left: 3px solid var(--cyan);
+  }
+  #locate {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 14px); right: 12px;
+    width: 52px; height: 52px; border: 2px solid var(--yellow); background: rgba(7,7,13,.85);
+    color: var(--yellow); font-size: 22px; cursor: pointer;
+    clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+    box-shadow: 0 0 12px var(--yellow);
+  }
+  #locate:active { background: var(--yellow); color: #000; }
+  #locate.on { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 12px var(--cyan); }
+
+  /* GPS marker */
+  .me { position: relative; width: 18px; height: 18px; }
+  .me::before {
+    content: ""; position: absolute; inset: 4px; background: var(--cyan);
+    transform: rotate(45deg); box-shadow: 0 0 10px var(--cyan), 0 0 22px var(--cyan);
+  }
+  .me::after {
+    content: ""; position: absolute; inset: -14px; border: 2px solid var(--cyan); border-radius: 50%;
+    animation: ping 1.8s ease-out infinite; opacity: 0;
+  }
+  @keyframes ping { 0% { transform: scale(.3); opacity: .9 } 100% { transform: scale(1.4); opacity: 0 } }
+
+  .maplibregl-ctrl-attrib { background: rgba(7,7,13,.7) !important; font-size: 9px; }
+  .maplibregl-ctrl-attrib a { color: #7a7a55 !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="fx"></div>
+<div id="title" class="hud">// NightCity Nav v0.1</div>
+<div id="coords" class="hud">NO SIGNAL</div>
+<button id="locate" class="hud" aria-label="Locate me">&#9678;</button>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+const Y = '#fcee0a', C = '#00f0ff', M = '#ff2a6d', BG = '#07070d';
+const FONT = ['Noto Sans Bold'];
+
+const style = {
+  version: 8,
+  glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
+  sources: {
+    omt: { type: 'vector', url: 'https://tiles.openfreemap.org/planet' }
+  },
+  layers: [
+    { id: 'bg', type: 'background', paint: { 'background-color': BG } },
+
+    { id: 'landcover', type: 'fill', source: 'omt', 'source-layer': 'landcover',
+      paint: { 'fill-color': '#0a1a16', 'fill-opacity': 0.8 } },
+    { id: 'landuse', type: 'fill', source: 'omt', 'source-layer': 'landuse',
+      paint: { 'fill-color': '#0d0d18' } },
+    { id: 'park', type: 'fill', source: 'omt', 'source-layer': 'park',
+      paint: { 'fill-color': '#0b2420', 'fill-outline-color': '#12665a' } },
+
+    { id: 'water', type: 'fill', source: 'omt', 'source-layer': 'water',
+      paint: { 'fill-color': '#041a24' } },
+    { id: 'water-edge', type: 'line', source: 'omt', 'source-layer': 'water',
+      paint: { 'line-color': C, 'line-width': 1, 'line-opacity': 0.6 } },
+    { id: 'waterway', type: 'line', source: 'omt', 'source-layer': 'waterway',
+      paint: { 'line-color': C, 'line-opacity': 0.4, 'line-width': 1 } },
+
+    { id: 'building', type: 'fill', source: 'omt', 'source-layer': 'building', minzoom: 13,
+      paint: { 'fill-color': '#12121f', 'fill-outline-color': '#3b2a5a' } },
+
+    { id: 'rail', type: 'line', source: 'omt', 'source-layer': 'transportation',
+      filter: ['==', 'class', 'rail'],
+      paint: { 'line-color': M, 'line-width': 1, 'line-dasharray': [3, 3], 'line-opacity': 0.7 } },
+
+    // road glow underlay
+    { id: 'road-glow', type: 'line', source: 'omt', 'source-layer': 'transportation',
+      filter: ['in', 'class', 'motorway', 'trunk', 'primary', 'secondary'],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': Y, 'line-opacity': 0.25, 'line-blur': 6,
+        'line-width': ['interpolate', ['exponential', 1.5], ['zoom'], 6, 2, 12, 8, 18, 40]
+      } },
+    { id: 'road-minor', type: 'line', source: 'omt', 'source-layer': 'transportation',
+      filter: ['in', 'class', 'minor', 'service', 'tertiary', 'track', 'path'],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#6a6320', 'line-opacity': 0.9,
+        'line-width': ['interpolate', ['exponential', 1.5], ['zoom'], 12, 0.5, 18, 8]
+      } },
+    { id: 'road-main', type: 'line', source: 'omt', 'source-layer': 'transportation',
+      filter: ['in', 'class', 'secondary', 'primary', 'trunk'],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#d9cc0a',
+        'line-width': ['interpolate', ['exponential', 1.5], ['zoom'], 6, 0.6, 12, 2, 18, 16]
+      } },
+    { id: 'road-motorway', type: 'line', source: 'omt', 'source-layer': 'transportation',
+      filter: ['==', 'class', 'motorway'],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': Y,
+        'line-width': ['interpolate', ['exponential', 1.5], ['zoom'], 5, 0.8, 12, 3, 18, 20]
+      } },
+
+    { id: 'boundary', type: 'line', source: 'omt', 'source-layer': 'boundary',
+      filter: ['<=', 'admin_level', 4],
+      paint: { 'line-color': M, 'line-width': 1, 'line-dasharray': [4, 2], 'line-opacity': 0.6 } },
+
+    // labels
+    { id: 'road-label', type: 'symbol', source: 'omt', 'source-layer': 'transportation_name', minzoom: 13,
+      layout: {
+        'symbol-placement': 'line', 'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
+        'text-font': FONT, 'text-size': 11, 'text-letter-spacing': 0.1, 'text-transform': 'uppercase'
+      },
+      paint: { 'text-color': C, 'text-halo-color': BG, 'text-halo-width': 2 } },
+    { id: 'poi', type: 'symbol', source: 'omt', 'source-layer': 'poi', minzoom: 15,
+      filter: ['<=', 'rank', 10],
+      layout: {
+        'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
+        'text-font': FONT, 'text-size': 10, 'text-offset': [0, 0.8], 'text-anchor': 'top'
+      },
+      paint: { 'text-color': M, 'text-halo-color': BG, 'text-halo-width': 2 } },
+    { id: 'place-small', type: 'symbol', source: 'omt', 'source-layer': 'place',
+      filter: ['in', 'class', 'suburb', 'neighbourhood', 'village', 'town'],
+      layout: {
+        'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
+        'text-font': FONT, 'text-size': 12, 'text-transform': 'uppercase', 'text-letter-spacing': 0.15
+      },
+      paint: { 'text-color': Y, 'text-halo-color': BG, 'text-halo-width': 2 } },
+    { id: 'place-city', type: 'symbol', source: 'omt', 'source-layer': 'place',
+      filter: ['in', 'class', 'city', 'state', 'country'],
+      layout: {
+        'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
+        'text-font': FONT, 'text-size': ['interpolate', ['linear'], ['zoom'], 3, 12, 10, 20],
+        'text-transform': 'uppercase', 'text-letter-spacing': 0.2
+      },
+      paint: { 'text-color': Y, 'text-halo-color': BG, 'text-halo-width': 2.5 } }
+  ]
+};
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style,
+  center: [14.4378, 50.0755], // Prague
+  zoom: 12,
+  pitch: 45,
+  bearing: -17,
+  attributionControl: { compact: true, customAttribution: '© OpenStreetMap contributors · OpenFreeMap' }
+});
+
+// --- GPS ---
+const coordsEl = document.getElementById('coords');
+const btn = document.getElementById('locate');
+let marker = null, watchId = null, following = false;
+
+function onPos(p) {
+  const { latitude: lat, longitude: lng } = p.coords;
+  coordsEl.textContent = `LAT ${lat.toFixed(5)}  LNG ${lng.toFixed(5)}`;
+  if (!marker) {
+    const el = document.createElement('div');
+    el.className = 'me';
+    marker = new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
+    map.flyTo({ center: [lng, lat], zoom: 16, speed: 1.4 });
+    following = true; btn.classList.add('on');
+  } else {
+    marker.setLngLat([lng, lat]);
+    if (following) map.easeTo({ center: [lng, lat], duration: 800 });
+  }
+}
+function onErr(e) { coordsEl.textContent = 'GPS ERROR: ' + e.message; }
+
+function startGps() {
+  if (!('geolocation' in navigator)) { coordsEl.textContent = 'NO GPS'; return; }
+  if (watchId === null) {
+    watchId = navigator.geolocation.watchPosition(onPos, onErr, { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 });
+  } else if (marker) {
+    following = true; btn.classList.add('on');
+    map.flyTo({ center: marker.getLngLat(), zoom: Math.max(map.getZoom(), 16) });
+  }
+}
+btn.addEventListener('click', startGps);
+map.on('dragstart', () => { following = false; btn.classList.remove('on'); });
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+</script>
+</body>
+</html>
